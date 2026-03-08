@@ -1,0 +1,105 @@
+# Clash Meta iOS 编译工作流
+name: Build Clash Meta iOS IPA
+
+# 触发条件：手动触发 / 推送代码到main分支时触发
+on:
+  workflow_dispatch:  # 手动触发（推荐）
+  push:
+    branches: [ main ]
+    paths:
+      - 'ios/**'
+      - 'core/**'
+
+# 工作流权限
+permissions:
+  contents: write
+
+# 作业配置
+jobs:
+  build-ios:
+    # 使用GitHub的macOS云环境（必须用macOS，才能打包iOS）
+    runs-on: macos-14
+    steps:
+      # 1. 拉取仓库代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive  # 拉取子模块（Clash Meta核心依赖）
+
+      # 2. 安装Go环境（编译Clash Meta核心）
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'  # 适配Clash Meta的Go版本
+          cache: true
+          cache-dependency-path: 'core/go.mod'
+
+      # 3. 安装Xcode命令行工具（打包iOS工程）
+      - name: Install Xcode Command Line Tools
+        run: |
+          xcode-select --install || true  # 忽略已安装的提示
+          sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer  # 指定Xcode版本
+
+      # 4. 编译Clash Meta Go核心为iOS静态库
+      - name: Build Clash Meta Core for iOS
+        run: |
+          cd $GITHUB_WORKSPACE/core
+          # 编译arm64架构（iOS设备主流架构）
+          GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC=clang \
+          go build -buildmode=c-archive -o clash_meta_arm64.a ./cmd/clash
+          # 将编译产物复制到iOS工程目录（路径需匹配KaringX/clashmi的工程结构）
+          mkdir -p $GITHUB_WORKSPACE/ios/ClashMeta/Frameworks
+          cp clash_meta_arm64.a $GITHUB_WORKSPACE/ios/ClashMeta/Frameworks/
+
+      # 5. 打包iOS工程为IPA（自动签名为开发版，仅自用）
+      - name: Build iOS IPA with Xcode
+        run: |
+          cd $GITHUB_WORKSPACE/ios
+          # 清理旧构建产物
+          xcodebuild clean -project ClashMeta.xcodeproj -scheme ClashMeta -configuration Release
+          # 打包Archive（IPA的前置步骤）
+          xcodebuild archive \
+            -project ClashMeta.xcodeproj \
+            -scheme ClashMeta \
+            -configuration Release \
+            -archivePath ./ClashMeta.xcarchive \
+            -destination generic/platform=iOS \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          # 导出IPA包（无签名，后续可自签）
+          xcodebuild -exportArchive \
+            -archivePath ./ClashMeta.xcarchive \
+            -exportPath ./IPA \
+            -exportOptionsPlist <(cat <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>development</string>
+            <key>teamID</key>
+            <string>XXXX</string>  # 无需修改，仅占位
+            <key>compileBitcode</key>
+            <false/>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>thinning</key>
+            <string>&lt;none&gt;</string>
+          </dict>
+          </plist>
+          EOF
+          )
+
+      # 6. 上传IPA包到GitHub Releases
+      - name: Upload IPA to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: clash-meta-ios-${{ github.run_id }}
+          name: Clash Meta iOS Build ${{ github.run_id }}
+          files: $GITHUB_WORKSPACE/ios/IPA/ClashMeta.ipa
+          body: |
+            自动编译的Clash Meta iOS IPA包
+            - 架构：arm64
+            - 无签名，需自行用Apple ID重签后安装
+        if: success()  # 仅编译成功时上传
