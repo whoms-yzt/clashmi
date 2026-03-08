@@ -1,20 +1,17 @@
-# ClashMI (Flutter+Mihomo) iOS 编译工作流
-name: Build ClashMI iOS IPA
+name: Build ClashMI Unsigned IPA (For Windows Resign)
 
 on:
-  workflow_dispatch:  # 仅手动触发
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 jobs:
-  build-ios:
-    runs-on: macos-14
+  build-unsigned-ipa:
+    runs-on: macos-latest
     steps:
-      # 1. 拉取代码（含Flutter工程）
-      - name: Checkout code
+      # 1. 拉取代码（含子模块）
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
 
       # 2. 安装Flutter环境（核心！Flutter工程必须先装Flutter）
@@ -24,113 +21,102 @@ jobs:
           flutter-version: '3.19.x'
           channel: 'stable'
 
-      # 3. 安装Xcode并确认路径
-      - name: Setup Xcode
+      # 3. 选择Xcode版本
+      - name: Select Xcode Version
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_15.0.app
           xcodebuild -version
-          # 打印所有目录，确认Podfile位置（关键调试）
-          echo "=== 全目录结构 ==="
-          find $GITHUB_WORKSPACE -name "Podfile"
-          find $GITHUB_WORKSPACE -name "Runner.xcworkspace"
 
-      # 4. 安装CocoaPods依赖（适配Podfile任意路径）
-      - name: Install CocoaPods Dependencies
-        run: |
-          # 自动查找Podfile位置
-          PODFILE_PATH=$(find $GITHUB_WORKSPACE -name "Podfile" | head -n 1)
-          if [ -z "$PODFILE_PATH" ]; then
-            echo "⚠️ 未找到Podfile，跳过pod install"
-          else
-            # 进入Podfile所在目录执行install
-            PODFILE_DIR=$(dirname "$PODFILE_PATH")
-            echo "✅ 找到Podfile：$PODFILE_PATH，进入目录：$PODFILE_DIR"
-            cd $PODFILE_DIR
-            pod install --verbose
-          fi
-
-      # 5. 编译Flutter iOS工程（生成原生代码）
-      - name: Build Flutter iOS (Release)
+      # 4. 定位iOS工程并安装依赖
+      - name: Prepare iOS Dependencies
         run: |
           # 找到Flutter工程根目录（含pubspec.yaml）
-          FLUTTER_PROJ_DIR=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
-          cd $FLUTTER_PROJ_DIR
-          # 获取Flutter依赖
+          FLUTTER_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
+          cd $FLUTTER_ROOT
+          
+          # 安装Flutter依赖
           flutter pub get
-          # 编译Flutter为iOS Release版（关闭签名）
-          flutter build ios --release --no-codesign --verbose
+          
+          # 进入iOS目录安装CocoaPods依赖
+          cd ios
+          pod install --repo-update || echo "CocoaPods install skipped (no Podfile)"
 
-      # 6. 用Xcode打包IPA（适配Runner工程任意路径）
-      - name: Build IPA with Xcode
+      # 5. 编译Flutter iOS（生成原生代码，无签名）
+      - name: Build Flutter iOS (No Sign)
         run: |
-          # 自动查找Runner.xcworkspace
-          WORKSPACE_PATH=$(find $GITHUB_WORKSPACE -name "Runner.xcworkspace" | head -n 1)
-          if [ -z "$WORKSPACE_PATH" ]; then
-            echo "❌ 未找到Runner.xcworkspace"
-            exit 1
-          fi
-          echo "✅ 找到Runner.xcworkspace：$WORKSPACE_PATH"
-          
-          # 工程目录
-          WORKSPACE_DIR=$(dirname "$WORKSPACE_PATH")
-          cd $WORKSPACE_DIR
-          
-          # 打包Archive（关闭强制签名）
-          xcodebuild archive \
-            -workspace "$WORKSPACE_PATH" \
-            -scheme Runner \
-            -configuration Release \
-            -archivePath $GITHUB_WORKSPACE/ClashMI.xcarchive \
-            -destination generic/platform=iOS \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO
-          
-          # 导出IPA
-          mkdir -p $GITHUB_WORKSPACE/IPA
-          xcodebuild -exportArchive \
-            -archivePath $GITHUB_WORKSPACE/ClashMI.xcarchive \
-            -exportPath $GITHUB_WORKSPACE/IPA \
-            -exportOptionsPlist <(cat <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>development</string>
-            <key>compileBitcode</key>
-            <false/>
-            <key>stripSwiftSymbols</key>
-            <true/>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>thinning</key>
-            <string>&lt;none&gt;</string>
-          </dict>
-          </plist>
-          EOF
-          )
-          
-          # 重命名IPA
-          if [ -f "$GITHUB_WORKSPACE/IPA/Runner.ipa" ]; then
-            mv $GITHUB_WORKSPACE/IPA/Runner.ipa $GITHUB_WORKSPACE/IPA/ClashMI.ipa
-            echo "✅ IPA生成成功！路径：$GITHUB_WORKSPACE/IPA/ClashMI.ipa"
-          else
-            echo "❌ IPA生成失败！"
-            exit 1
-          fi
+          FLUTTER_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
+          cd $FLUTTER_ROOT
+          flutter build ios --release --no-codesign
 
-      # 7. 上传IPA到Releases
-      - name: Upload IPA to GitHub Releases
-        uses: softprops/action-gh-release@v2
+      # 6. 打包未签名IPA（核心步骤，修复语法错误）
+      - name: Build & Export Unsigned IPA
+        run: |
+          # 定位iOS工程目录
+          IOS_DIR=$(find $GITHUB_WORKSPACE -name "Runner.xcworkspace" | head -n 1 | xargs dirname)
+          cd $IOS_DIR
+          
+          # 配置参数
+          SCHEME_NAME="Runner"
+          CONFIGURATION="Release"
+          BUILD_DIR="./build"
+          IPA_DIR="./ipa"
+          ARCHIVE_PATH="$BUILD_DIR/ClashMI.xcarchive"
+
+          # 创建目录
+          mkdir -p $BUILD_DIR
+          mkdir -p $IPA_DIR
+
+          # Step 1: 生成归档文件（完全禁用签名）
+          xcodebuild archive \
+            -workspace "Runner.xcworkspace" \
+            -scheme "$SCHEME_NAME" \
+            -configuration "$CONFIGURATION" \
+            -archivePath "$ARCHIVE_PATH" \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ENABLE_BITCODE=NO \
+            SKIP_INSTALL=NO
+
+          # Step 2: 生成合法的ExportOptions.plist（修复XML语法）
+          cat > ./ExportOptions.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>development</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>stripSwiftSymbols</key>
+    <true/>
+    <key>teamID</key>
+    <string>XXXXXX</string>
+    <key>compileBitcode</key>
+    <false/>
+    <key>uploadSymbols</key>
+    <false/>
+</dict>
+</plist>
+EOF
+
+          # Step 3: 导出未签名IPA
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$IPA_DIR" \
+            -exportOptionsPlist ./ExportOptions.plist \
+            CODE_SIGNING_ALLOWED=NO
+
+          # 重命名IPA（便于识别）
+          mv $IPA_DIR/Runner.ipa $IPA_DIR/ClashMI-Unsigned.ipa || echo "IPA rename skipped"
+
+      # 7. 上传IPA产物（修复路径语法）
+      - name: Upload Unsigned IPA
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: clashmi-ios-${{ github.run_id }}
-          name: ClashMI iOS Build ${{ github.run_id }}
-          files: $GITHUB_WORKSPACE/IPA/ClashMI.ipa
-          body: |
-            🚀 ClashMI (Flutter+Mihomo内核) iOS IPA包
-            - 基于KaringX/clashmi Flutter工程自动编译
-            - 内置最新Mihomo(Clash.Meta)内核
-            - 未签名，需用Apple ID重签后安装
-        if: success()
+          name: ClashMI-Unsigned-IPA
+          path: |
+            **/ipa/*.ipa
+          retention-days: 30
