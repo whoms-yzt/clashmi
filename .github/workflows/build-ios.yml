@@ -7,116 +7,125 @@ jobs:
   build-unsigned-ipa:
     runs-on: macos-latest
     steps:
-      # 1. 拉取代码（含子模块）
+      # 1. 拉取仓库代码（含子模块）
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
-      # 2. 安装Flutter环境（核心！Flutter工程必须先装Flutter）
+      # 2. 安装Flutter环境（Flutter工程必须）
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.19.x'
           channel: 'stable'
 
-      # 3. 选择Xcode版本
-      - name: Select Xcode Version
+      # 3. 配置Xcode环境
+      - name: Configure Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.0.app
+          sudo xcode-select -s /Applications/Xcode_15.0.app/Contents/Developer
           xcodebuild -version
+          # 安装CocoaPods最新版
+          gem install cocoapods
 
-      # 4. 定位iOS工程并安装依赖
-      - name: Prepare iOS Dependencies
+      # 4. 安装依赖（Flutter + iOS Pods）
+      - name: Install Dependencies
         run: |
-          # 找到Flutter工程根目录（含pubspec.yaml）
-          FLUTTER_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
-          cd $FLUTTER_ROOT
+          # 定位Flutter根目录（pubspec.yaml所在）
+          FLUTTER_PROJ_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
+          echo "Flutter工程根目录: $FLUTTER_PROJ_ROOT"
           
           # 安装Flutter依赖
+          cd $FLUTTER_PROJ_ROOT
           flutter pub get
           
-          # 进入iOS目录安装CocoaPods依赖
+          # 进入iOS目录安装Pods
           cd ios
-          pod install --repo-update || echo "CocoaPods install skipped (no Podfile)"
+          pod install
 
-      # 5. 编译Flutter iOS（生成原生代码，无签名）
-      - name: Build Flutter iOS (No Sign)
+      # 5. 编译Flutter iOS代码（生成原生工程）
+      - name: Build Flutter iOS (No Code Sign)
         run: |
-          FLUTTER_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
-          cd $FLUTTER_ROOT
-          flutter build ios --release --no-codesign
+          FLUTTER_PROJ_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
+          cd $FLUTTER_PROJ_ROOT
+          flutter build ios --release --no-codesign --verbose
 
-      # 6. 打包未签名IPA（核心步骤，修复语法错误）
-      - name: Build & Export Unsigned IPA
+      # 6. 打包未签名IPA（核心修复所有语法错误）
+      - name: Package Unsigned IPA
         run: |
-          # 定位iOS工程目录
-          IOS_DIR=$(find $GITHUB_WORKSPACE -name "Runner.xcworkspace" | head -n 1 | xargs dirname)
-          cd $IOS_DIR
+          # 定位iOS工程目录（Runner.xcworkspace所在）
+          IOS_PROJ_DIR=$(find $GITHUB_WORKSPACE -name "Runner.xcworkspace" | head -n 1 | xargs dirname)
+          echo "iOS工程目录: $IOS_PROJ_DIR"
+          cd $IOS_PROJ_DIR
           
-          # 配置参数
-          SCHEME_NAME="Runner"
-          CONFIGURATION="Release"
-          BUILD_DIR="./build"
-          IPA_DIR="./ipa"
-          ARCHIVE_PATH="$BUILD_DIR/ClashMI.xcarchive"
-
+          # 定义变量（避免引用错误）
+          SCHEME="Runner"
+          CONFIG="Release"
+          BUILD_DIR="$IOS_PROJ_DIR/build"
+          IPA_DIR="$IOS_PROJ_DIR/ipa"
+          ARCHIVE="$BUILD_DIR/ClashMI.xcarchive"
+          
           # 创建目录
           mkdir -p $BUILD_DIR
           mkdir -p $IPA_DIR
-
-          # Step 1: 生成归档文件（完全禁用签名）
+          
+          # Step 1: 生成xcarchive（完全禁用签名）
           xcodebuild archive \
-            -workspace "Runner.xcworkspace" \
-            -scheme "$SCHEME_NAME" \
-            -configuration "$CONFIGURATION" \
-            -archivePath "$ARCHIVE_PATH" \
-            -destination 'generic/platform=iOS' \
+            -workspace Runner.xcworkspace \
+            -scheme $SCHEME \
+            -configuration $CONFIG \
+            -archivePath $ARCHIVE \
+            -destination "generic/platform=iOS" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             ENABLE_BITCODE=NO \
             SKIP_INSTALL=NO
-
+          
           # Step 2: 生成合法的ExportOptions.plist（修复XML语法）
-          cat > ./ExportOptions.plist <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>method</key>
-    <string>development</string>
-    <key>signingStyle</key>
-    <string>manual</string>
-    <key>stripSwiftSymbols</key>
-    <true/>
-    <key>teamID</key>
-    <string>XXXXXX</string>
-    <key>compileBitcode</key>
-    <false/>
-    <key>uploadSymbols</key>
-    <false/>
-</dict>
-</plist>
-EOF
-
-          # Step 3: 导出未签名IPA
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE_PATH" \
-            -exportPath "$IPA_DIR" \
-            -exportOptionsPlist ./ExportOptions.plist \
+          cat > "$IOS_PROJ_DIR/ExportOptions.plist" << 'EOF'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+            <key>method</key>
+            <string>development</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>teamID</key>
+            <string>XXXXXX</string>
+            <key>compileBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <false/>
+            </dict>
+            </plist>
+            EOF
+            
+            # Step 3: 导出未签名IPA
+            xcodebuild -exportArchive \
+            -archivePath $ARCHIVE \
+            -exportPath $IPA_DIR \
+            -exportOptionsPlist "$IOS_PROJ_DIR/ExportOptions.plist" \
             CODE_SIGNING_ALLOWED=NO
-
-          # 重命名IPA（便于识别）
-          mv $IPA_DIR/Runner.ipa $IPA_DIR/ClashMI-Unsigned.ipa || echo "IPA rename skipped"
-
-      # 7. 上传IPA产物（修复路径语法）
+            
+            # 重命名IPA（确保路径引用正确）
+            if [ -f "$IPA_DIR/Runner.ipa" ]; then
+            mv "$IPA_DIR/Runner.ipa" "$IPA_DIR/ClashMI-Unsigned.ipa"
+          echo "IPA重命名成功: ClashMI-Unsigned.ipa"
+            else
+            echo "IPA文件未找到，跳过重命名"
+            ls -la $IPA_DIR
+            fi
+          
+      # 7. 上传IPA产物（修复路径匹配）
       - name: Upload Unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: ClashMI-Unsigned-IPA
-          path: |
-            **/ipa/*.ipa
+          path: ${{ github.workspace }}/**/ipa/*.ipa
           retention-days: 30
