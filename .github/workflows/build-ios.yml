@@ -14,58 +14,67 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      # 2. 安装Flutter环境（ClashMI是Flutter工程，必须）
-      - name: Setup Flutter
+      # 2. 安装适配的Flutter版本（核心：匹配Dart 3.9+）
+      - name: Setup Flutter (Dart 3.9+)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.x'
+          flutter-version: '3.24.x'  # 该版本内置Dart 3.9+，匹配仓库要求
           channel: 'stable'
+          # 禁用Flutter analytics（避免首次运行提示）
+          cache: true
 
-      # 3. 自动检测并配置Xcode（核心修复：不再硬编码Xcode路径）
+      # 3. 自动配置Xcode（使用Runner默认版本）
       - name: Auto Configure Xcode
         run: |
-          # 列出当前可用的Xcode版本（避免硬编码路径错误）
+          # 查看可用Xcode版本
           ls -la /Applications/ | grep Xcode
-          # 使用系统默认的Xcode（GitHub Runner自带的最新版）
+          # 配置默认Xcode
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          # 验证Xcode配置
+          # 验证Xcode和Dart版本
           xcodebuild -version
-          # 安装CocoaPods（适配Flutter iOS依赖）
-          gem install cocoapods
+          dart --version
+          flutter --version
 
-      # 4. 安装Flutter + iOS依赖（适配官方仓库结构）
+      # 4. 安装Flutter + iOS依赖（适配版本要求）
       - name: Install All Dependencies
         run: |
-          # 定位Flutter工程根目录（pubspec.yaml所在）
+          # 定位Flutter工程根目录
           FLUTTER_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
           echo "✅ 找到Flutter根目录: $FLUTTER_ROOT"
           
-          # 安装Flutter依赖
+          # 进入根目录，安装依赖（先禁用analytics避免交互）
           cd $FLUTTER_ROOT
-          flutter pub get
-          flutter doctor -v # 检查Flutter环境
+          flutter config --no-analytics
+          flutter pub get --verbose
           
-          # 进入iOS目录安装Pods（官方工程ios子目录）
+          # 检查依赖是否安装成功
+          if [ $? -ne 0 ]; then
+            echo "❌ Flutter依赖安装失败，检查pubspec.yaml"
+            cat pubspec.yaml | grep sdk
+            exit 1
+          fi
+          
+          # 进入iOS目录安装Pods
           cd ios
           pod install --verbose || echo "⚠️ CocoaPods安装跳过（无Podfile）"
 
-      # 5. 编译Flutter iOS代码（生成原生工程，无签名）
+      # 5. 编译Flutter iOS代码（无签名）
       - name: Build Flutter iOS (No Sign)
         run: |
           FLUTTER_ROOT=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
           cd $FLUTTER_ROOT
-          # Flutter编译iOS Release版（关闭签名）
-          flutter build ios --release --no-codesign --verbose
+          # 编译iOS Release版（关闭签名，适配新版本Flutter）
+          flutter build ios --release --no-codesign --verbose --ignore-version-check
 
-      # 6. 打包未签名IPA（适配Runner工程，无语法错误）
+      # 6. 打包未签名IPA（适配Runner工程）
       - name: Package Unsigned IPA
         run: |
-          # 定位iOS工程目录（Runner.xcworkspace）
+          # 定位iOS工程目录
           IOS_DIR=$(find $GITHUB_WORKSPACE -name "Runner.xcworkspace" | head -n 1 | xargs dirname)
           echo "✅ 找到iOS工程目录: $IOS_DIR"
           cd $IOS_DIR
           
-          # 定义变量（避免硬编码）
+          # 定义变量
           SCHEME="Runner"
           CONFIG="Release"
           BUILD_DIR="./build"
@@ -76,7 +85,7 @@ jobs:
           mkdir -p $BUILD_DIR
           mkdir -p $IPA_DIR
           
-          # Step 1: 生成xcarchive（完全禁用签名）
+          # Step 1: 生成xcarchive（禁用签名）
           xcodebuild archive \
             -workspace Runner.xcworkspace \
             -scheme $SCHEME \
@@ -88,9 +97,10 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             ENABLE_BITCODE=NO \
-            SKIP_INSTALL=NO
-          
-          # Step 2: 生成合法的ExportOptions.plist（无XML错误）
+            SKIP_INSTALL=NO \
+            ONLY_ACTIVE_ARCH=NO
+
+          # Step 2: 生成合法的ExportOptions.plist
           cat > "./ExportOptions.plist" << 'EOF'
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -119,17 +129,18 @@ jobs:
             -exportOptionsPlist "./ExportOptions.plist" \
             CODE_SIGNING_ALLOWED=NO
             
-            # 重命名IPA（便于识别）
+            # 重命名IPA并验证
             if [ -f "$IPA_DIR/Runner.ipa" ]; then
             mv "$IPA_DIR/Runner.ipa" "$IPA_DIR/ClashMI-Unsigned.ipa"
-          echo "✅ IPA重命名成功: ClashMI-Unsigned.ipa"
+            echo "✅ IPA生成成功！文件路径：$IPA_DIR/ClashMI-Unsigned.ipa"
             ls -la $IPA_DIR
             else
-            echo "⚠️ IPA文件未找到，目录内容："
+            echo "❌ IPA文件未生成，检查Xcode打包日志"
             ls -la $IPA_DIR
+            exit 1
             fi
-
-      # 7. 上传IPA产物（确保能下载）
+          
+      # 7. 上传IPA产物
       - name: Upload Unsigned IPA
         uses: actions/upload-artifact@v4
         with:
