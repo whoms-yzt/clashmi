@@ -21,49 +21,77 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.x'  # 适配主流Flutter版本
+          flutter-version: '3.19.x'
           channel: 'stable'
 
-      # 3. 安装Xcode和CocoaPods
-      - name: Setup Xcode & CocoaPods
+      # 3. 安装Xcode并确认路径
+      - name: Setup Xcode
         run: |
           sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
           xcodebuild -version
-          # 安装CocoaPods依赖
-          pod install --project-directory=$GITHUB_WORKSPACE
+          # 打印所有目录，确认Podfile位置（关键调试）
+          echo "=== 全目录结构 ==="
+          find $GITHUB_WORKSPACE -name "Podfile"
+          find $GITHUB_WORKSPACE -name "Runner.xcworkspace"
 
-      # 4. 打印Flutter工程结构（确认路径）
-      - name: Show Flutter Project Structure
+      # 4. 安装CocoaPods依赖（适配Podfile任意路径）
+      - name: Install CocoaPods Dependencies
         run: |
-          echo "=== Flutter工程目录 ==="
-          ls -la $GITHUB_WORKSPACE
-          flutter doctor  # 检查Flutter环境
+          # 自动查找Podfile位置
+          PODFILE_PATH=$(find $GITHUB_WORKSPACE -name "Podfile" | head -n 1)
+          if [ -z "$PODFILE_PATH" ]; then
+            echo "⚠️ 未找到Podfile，跳过pod install"
+          else
+            # 进入Podfile所在目录执行install
+            PODFILE_DIR=$(dirname "$PODFILE_PATH")
+            echo "✅ 找到Podfile：$PODFILE_PATH，进入目录：$PODFILE_DIR"
+            cd $PODFILE_DIR
+            pod install --verbose
+          fi
 
-      # 5. 编译Flutter iOS工程为IPA（核心步骤）
-      - name: Build Flutter iOS IPA (Mihomo内核)
+      # 5. 编译Flutter iOS工程（生成原生代码）
+      - name: Build Flutter iOS (Release)
         run: |
-          cd $GITHUB_WORKSPACE
+          # 找到Flutter工程根目录（含pubspec.yaml）
+          FLUTTER_PROJ_DIR=$(find $GITHUB_WORKSPACE -name "pubspec.yaml" | head -n 1 | xargs dirname)
+          cd $FLUTTER_PROJ_DIR
+          # 获取Flutter依赖
+          flutter pub get
+          # 编译Flutter为iOS Release版（关闭签名）
+          flutter build ios --release --no-codesign --verbose
+
+      # 6. 用Xcode打包IPA（适配Runner工程任意路径）
+      - name: Build IPA with Xcode
+        run: |
+          # 自动查找Runner.xcworkspace
+          WORKSPACE_PATH=$(find $GITHUB_WORKSPACE -name "Runner.xcworkspace" | head -n 1)
+          if [ -z "$WORKSPACE_PATH" ]; then
+            echo "❌ 未找到Runner.xcworkspace"
+            exit 1
+          fi
+          echo "✅ 找到Runner.xcworkspace：$WORKSPACE_PATH"
           
-          # 第一步：Flutter打包为Release模式（生成iOS原生工程）
-          flutter build ios --release --no-codesign
+          # 工程目录
+          WORKSPACE_DIR=$(dirname "$WORKSPACE_PATH")
+          cd $WORKSPACE_DIR
           
-          # 第二步：用Xcode打包IPA（适配Runner工程）
-          # Flutter编译后的工程在ios目录（这里仓库根目录就是ios工程）
+          # 打包Archive（关闭强制签名）
           xcodebuild archive \
-            -workspace Runner.xcworkspace \
+            -workspace "$WORKSPACE_PATH" \
             -scheme Runner \
             -configuration Release \
-            -archivePath ./ClashMI.xcarchive \
+            -archivePath $GITHUB_WORKSPACE/ClashMI.xcarchive \
             -destination generic/platform=iOS \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO
           
-          # 第三步：导出未签名IPA
-          mkdir -p ./IPA
+          # 导出IPA
+          mkdir -p $GITHUB_WORKSPACE/IPA
           xcodebuild -exportArchive \
-            -archivePath ./ClashMI.xcarchive \
-            -exportPath ./IPA \
+            -archivePath $GITHUB_WORKSPACE/ClashMI.xcarchive \
+            -exportPath $GITHUB_WORKSPACE/IPA \
             -exportOptionsPlist <(cat <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -84,28 +112,25 @@ jobs:
           EOF
           )
           
-          # 重命名IPA为ClashMI.ipa（方便识别）
-          mv ./IPA/Runner.ipa ./IPA/ClashMI.ipa
-          
-          # 确认IPA生成成功
-          if [ -f "./IPA/ClashMI.ipa" ]; then
-            echo "✅ IPA生成成功！路径：./IPA/ClashMI.ipa"
-            ls -la ./IPA
+          # 重命名IPA
+          if [ -f "$GITHUB_WORKSPACE/IPA/Runner.ipa" ]; then
+            mv $GITHUB_WORKSPACE/IPA/Runner.ipa $GITHUB_WORKSPACE/IPA/ClashMI.ipa
+            echo "✅ IPA生成成功！路径：$GITHUB_WORKSPACE/IPA/ClashMI.ipa"
           else
             echo "❌ IPA生成失败！"
             exit 1
           fi
 
-      # 6. 上传IPA到Releases
-      - name: Upload IPA to Releases
+      # 7. 上传IPA到Releases
+      - name: Upload IPA to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: clashmi-ios-${{ github.run_id }}
           name: ClashMI iOS Build ${{ github.run_id }}
-          files: ./IPA/ClashMI.ipa
+          files: $GITHUB_WORKSPACE/IPA/ClashMI.ipa
           body: |
             🚀 ClashMI (Flutter+Mihomo内核) iOS IPA包
-            - 基于KaringX/clashmi Flutter工程编译
-            - 内置Mihomo(Clash.Meta)内核
+            - 基于KaringX/clashmi Flutter工程自动编译
+            - 内置最新Mihomo(Clash.Meta)内核
             - 未签名，需用Apple ID重签后安装
         if: success()
